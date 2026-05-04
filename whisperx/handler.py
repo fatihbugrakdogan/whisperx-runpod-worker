@@ -81,7 +81,7 @@ def _get_diarize_pipeline(hf_token: str):
     if _diarize_hf_token != hf_token or _diarize_pipeline is None:
         print("[whisperx] Loading diarization pipeline")
         _diarize_pipeline = whisperx.DiarizationPipeline(
-            use_auth_token=hf_token, device=DEVICE
+            token=hf_token, device=DEVICE
         )
         _diarize_hf_token = hf_token
     return _diarize_pipeline

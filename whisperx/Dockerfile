@@ -30,14 +30,11 @@ RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# ── PyTorch (CUDA 12.1) ────────────────────────────────────────────────────────
-RUN pip install --no-cache-dir \
-        torch==2.3.1 torchaudio==2.3.1 \
-        --index-url https://download.pytorch.org/whl/cu121
-
-# ── Python dependencies ────────────────────────────────────────────────────────
+# ── Python dependencies (torch pulled in by whisperx via cu121 index) ─────────
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cu121 \
+        -r /tmp/requirements.txt
 
 # ── Bake Whisper large-v3 + Turkish alignment model ───────────────────────────
 COPY download_models.py /tmp/download_models.py

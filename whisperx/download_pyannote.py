@@ -9,5 +9,5 @@ if not hf_token:
 
 print("==> Downloading pyannote/speaker-diarization-3.1 ...")
 from pyannote.audio import Pipeline
-Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token)
+Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=hf_token)
 print("==> pyannote diarization model OK")
