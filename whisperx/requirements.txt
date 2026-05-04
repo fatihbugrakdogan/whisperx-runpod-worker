@@ -1,0 +1,11 @@
+# RunPod serverless SDK
+runpod>=1.7.0
+
+# WhisperX pulls in faster-whisper, pyannote.audio, transformers, etc.
+whisperx>=3.1.1
+
+# Explicit pyannote pin — whisperx sometimes resolves an old version
+pyannote.audio>=3.1.0
+
+# Make sure we get the right ctranslate2 build for CUDA 12.x
+ctranslate2>=4.0.0
