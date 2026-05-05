@@ -26,6 +26,8 @@ import os
 import tempfile
 import urllib.request
 
+import noisereduce as nr
+import numpy as np
 import runpod
 import torch
 import whisperx
@@ -84,8 +86,25 @@ def _get_diarize_pipeline(hf_token: str):
         _diarize_pipeline = DiarizationPipeline(
             token=hf_token, device=DEVICE
         )
+        # Lower clustering threshold → more aggressive speaker separation.
+        # Default is ~0.7; 0.55 works better for phone recordings with echo.
+        try:
+            _diarize_pipeline.model.instantiate({"clustering": {"threshold": 0.55}})
+            print("[whisperx] Clustering threshold set to 0.55")
+        except Exception as e:
+            print(f"[whisperx] Could not set clustering threshold: {e}")
         _diarize_hf_token = hf_token
     return _diarize_pipeline
+
+
+def _fill_missing_speakers(segments: list) -> None:
+    """Propagate speaker labels to segments that pyannote left unlabeled."""
+    last = ""
+    for seg in segments:
+        if seg.get("speaker"):
+            last = seg["speaker"]
+        elif last:
+            seg["speaker"] = last
 
 
 def handler(job: dict) -> dict:
@@ -139,16 +158,27 @@ def handler(job: dict) -> dict:
             return_char_alignments=False,
         )
 
-    # 4. Diarize (speaker labels) -----------------------------------------------
+    # 4. Denoise audio before diarization (keeps transcription untouched) --------
+    print("[whisperx] Applying noise reduction for diarization…")
+    audio_denoised = nr.reduce_noise(
+        y=audio,
+        sr=whisperx.audio.SAMPLE_RATE,
+        stationary=False,
+        prop_decrease=0.75,
+    ).astype(np.float32)
+
+    # 5. Diarize (speaker labels) -----------------------------------------------
     if do_diarize and hf_token:
         print(f"[whisperx] Diarizing (min={min_speakers}, max={max_speakers})…")
         diarize = _get_diarize_pipeline(hf_token)
         diarize_segments = diarize(
-            audio,
+            audio_denoised,
             min_speakers=min_speakers,
             max_speakers=max_speakers,
         )
         result = whisperx.assign_word_speakers(diarize_segments, result)
+        # Fill missing speaker labels by propagating the nearest known speaker
+        _fill_missing_speakers(result.get("segments", []))
     elif do_diarize and not hf_token:
         print("[whisperx] WARNING: diarize=true but hf_token is empty — skipping diarization")
 
