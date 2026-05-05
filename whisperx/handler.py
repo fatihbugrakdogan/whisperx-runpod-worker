@@ -84,13 +84,15 @@ def _get_diarize_pipeline(hf_token: str):
     if _diarize_hf_token != hf_token or _diarize_pipeline is None:
         print("[whisperx] Loading diarization pipeline")
         _diarize_pipeline = DiarizationPipeline(
-            token=hf_token, device=DEVICE
+            model_name="pyannote/speaker-diarization-3.1",
+            token=hf_token,
+            device=DEVICE,
         )
         # Lower clustering threshold → more aggressive speaker separation.
-        # Default is ~0.7; 0.55 works better for phone recordings with echo.
+        # Default ~0.7; 0.5 works better for phone recordings with echo/reverb.
         try:
-            _diarize_pipeline.model.instantiate({"clustering": {"threshold": 0.55}})
-            print("[whisperx] Clustering threshold set to 0.55")
+            _diarize_pipeline.model.instantiate({"clustering": {"threshold": 0.50}})
+            print("[whisperx] Using speaker-diarization-3.1, threshold=0.50")
         except Exception as e:
             print(f"[whisperx] Could not set clustering threshold: {e}")
         _diarize_hf_token = hf_token
@@ -179,6 +181,10 @@ def handler(job: dict) -> dict:
         result = whisperx.assign_word_speakers(diarize_segments, result)
         # Fill missing speaker labels by propagating the nearest known speaker
         _fill_missing_speakers(result.get("segments", []))
+        # Log speaker distribution for debugging
+        from collections import Counter
+        dist = Counter(s.get("speaker", "") for s in result.get("segments", []))
+        print(f"[whisperx] Speaker distribution: {dict(dist)}")
     elif do_diarize and not hf_token:
         print("[whisperx] WARNING: diarize=true but hf_token is empty — skipping diarization")
 
