@@ -29,6 +29,7 @@ import urllib.request
 import runpod
 import torch
 import whisperx
+from whisperx.diarize import DiarizationPipeline
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -80,7 +81,7 @@ def _get_diarize_pipeline(hf_token: str):
     global _diarize_pipeline, _diarize_hf_token
     if _diarize_hf_token != hf_token or _diarize_pipeline is None:
         print("[whisperx] Loading diarization pipeline")
-        _diarize_pipeline = whisperx.DiarizationPipeline(
+        _diarize_pipeline = DiarizationPipeline(
             token=hf_token, device=DEVICE
         )
         _diarize_hf_token = hf_token
