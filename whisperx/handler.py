@@ -100,8 +100,7 @@ def diarize_with_nemo(
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, cmd)
 
-    base = os.path.splitext(os.path.basename(audio_path))[0]
-    srt_path = os.path.join(output_dir, f"{base}.srt")
+    srt_path = f"{os.path.splitext(audio_path)[0]}.srt"
     if not os.path.exists(srt_path):
         raise FileNotFoundError(f"Expected SRT output not found: {srt_path}")
     return srt_path
@@ -161,9 +160,7 @@ def handler(job: dict) -> dict:
     inp = job["input"]
     audio_url: str = inp["audio_file"]
     model: str = inp.get("model", "large-v3")
-    min_speakers: int = int(inp.get("min_speakers", 2))
-    max_speakers: int = int(inp.get("max_speakers", 2))
-    # language always "tr"; hf_token / diarize / batch_size / compute_type ignored
+    # language always "tr"; min/max_speakers, hf_token, diarize, batch_size, compute_type ignored
 
     suffix = ".wav"
     for ext in (".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm"):
