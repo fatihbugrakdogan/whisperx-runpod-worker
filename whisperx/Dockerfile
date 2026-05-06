@@ -1,14 +1,13 @@
 # syntax=docker/dockerfile:1
 # ── WhisperX RunPod Serverless Worker (models baked in) ───────────────────────
 #
-# Build (Phase 3 — no HF_TOKEN needed, pyannote removed):
-#   docker buildx build -t whisperx-worker:phase3 --load .
+# Build:
+#   docker buildx build -t fatihbugra/whisperx-worker:latest --push .
 #
 # RunPod Serverless:
-#   Container image : whisperx-worker:latest
-#   Container disk  : 30 GB
-#   Network volume  : not needed (all models inside image)
-#   GPU             : RTX 3090 / A100
+#   Container image : fatihbugra/whisperx-worker:latest
+#   Container disk  : 40 GB
+#   GPU             : A4000 / A5000 / A100
 # ─────────────────────────────────────────────────────────────────────────────
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
@@ -33,15 +32,13 @@ RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1
 
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# ── Python dependencies (torch pulled in by whisperx via cu121 index) ─────────
+# ── Python dependencies ────────────────────────────────────────────────────────
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cu121 \
         -r /tmp/requirements.txt
 
-# ── Phase 3: whisper-diarization (NeMo ClusteringDiarizer backend) ────────────
-# Clone at a pinned commit for reproducibility; install with repo's constraints
-# to avoid conflicts with the existing WhisperX/pyannote environment.
+# ── whisper-diarization (NeMo backend) ────────────────────────────────────────
 RUN git clone https://github.com/MahmoudAshraf97/whisper-diarization.git /app/whisper-diarization \
     && pip install --no-cache-dir \
        -c /app/whisper-diarization/constraints.txt \

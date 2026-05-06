@@ -39,7 +39,5 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: fatihbugra/whisperx-worker:latest
-          secrets: |
-            hf_token=${{ secrets.HF_TOKEN }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=fatihbugra/whisperx-worker:buildcache
+          cache-to: type=registry,ref=fatihbugra/whisperx-worker:buildcache,mode=max

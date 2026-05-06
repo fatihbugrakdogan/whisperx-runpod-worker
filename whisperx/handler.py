@@ -91,7 +91,7 @@ def diarize_with_nemo(
         "--whisper-model", model,
         "--device", DEVICE,
         "--language", "tr",
-        "--stemming", "False",  # audio already preprocessed by DeepFilterNet
+        "--no-stem",  # disable Demucs source separation (audio already preprocessed)
     ]
     # Pass an exact speaker count only when caller is certain (min == max).
     # NeMo oracle mode over-constrains when the number is wrong.
