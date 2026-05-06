@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
     && add-apt-repository ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
         python3.11 python3.11-dev python3.11-distutils ffmpeg git wget curl \
+        build-essential \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN wget -qO- https://bootstrap.pypa.io/get-pip.py | python3.11
