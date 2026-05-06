@@ -128,12 +128,14 @@ def parse_srt(srt_path: str) -> list[dict]:
 
         speaker = ""
         text = raw_text
-        # whisper-diarization prefixes each line with "SPEAKER_XX: "
-        if raw_text.startswith("SPEAKER_"):
-            colon = raw_text.find(": ")
-            if colon != -1:
-                speaker = raw_text[:colon].strip()
-                text = raw_text[colon + 2:].strip()
+        # whisper-diarization prefixes lines with "SPEAKER_XX: " or "Speaker N: "
+        for prefix in ("SPEAKER_", "Speaker "):
+            if raw_text.startswith(prefix):
+                colon = raw_text.find(": ")
+                if colon != -1:
+                    speaker = raw_text[:colon].strip()
+                    text = raw_text[colon + 2:].strip()
+                break
 
         segments.append({
             "id": i,
