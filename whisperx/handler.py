@@ -29,6 +29,7 @@ Output:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -106,6 +107,14 @@ def diarize_with_nemo(
     return srt_path
 
 
+def _normalize_speaker(raw_label: str) -> str:
+    """Convert 'Speaker N' → 'SPEAKER_0N' to match backend expectations."""
+    m = re.match(r"Speaker\s+(\d+)$", raw_label, re.IGNORECASE)
+    if m:
+        return f"SPEAKER_{int(m.group(1)):02d}"
+    return raw_label
+
+
 def _srt_ts_to_s(ts: str) -> float:
     """Parse SRT timestamp 'HH:MM:SS,mmm' → seconds."""
     h, m, s = ts.strip().replace(",", ".").split(":")
@@ -133,7 +142,7 @@ def parse_srt(srt_path: str) -> list[dict]:
             if raw_text.startswith(prefix):
                 colon = raw_text.find(": ")
                 if colon != -1:
-                    speaker = raw_text[:colon].strip()
+                    speaker = _normalize_speaker(raw_text[:colon].strip())
                     text = raw_text[colon + 2:].strip()
                 break
 
