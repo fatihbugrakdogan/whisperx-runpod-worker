@@ -99,7 +99,13 @@ def diarize_with_nemo(
         cmd.extend(["--num-speakers", str(min_speakers)])
 
     print(f"[nemo] Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True, cwd=output_dir, timeout=3600)
+    result = subprocess.run(cmd, cwd=output_dir, timeout=3600, capture_output=True, text=True)
+    if result.stdout:
+        print(f"[nemo] stdout:\n{result.stdout[-3000:]}")
+    if result.stderr:
+        print(f"[nemo] stderr:\n{result.stderr[-3000:]}")
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd)
 
     base = os.path.splitext(os.path.basename(audio_path))[0]
     srt_path = os.path.join(output_dir, f"{base}.srt")
