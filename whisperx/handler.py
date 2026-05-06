@@ -79,8 +79,6 @@ def diarize_with_nemo(
     audio_path: str,
     output_dir: str,
     model: str = "large-v3",
-    min_speakers: int = 2,
-    max_speakers: int = 2,
 ) -> str:
     """Run whisper-diarization (NeMo backend). Returns path to the output SRT file."""
     os.makedirs(output_dir, exist_ok=True)
@@ -93,11 +91,6 @@ def diarize_with_nemo(
         "--language", "tr",
         "--no-stem",  # disable Demucs source separation (audio already preprocessed)
     ]
-    # Pass an exact speaker count only when caller is certain (min == max).
-    # NeMo oracle mode over-constrains when the number is wrong.
-    if min_speakers == max_speakers:
-        cmd.extend(["--num-speakers", str(min_speakers)])
-
     print(f"[nemo] Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=output_dir, timeout=3600, capture_output=True, text=True)
     if result.stdout:
@@ -195,9 +188,7 @@ def handler(job: dict) -> dict:
         preprocess_audio(tmp_path, cleaned_path)
 
         # 2. Transcribe + diarize via NeMo hybrid subprocess
-        srt_path = diarize_with_nemo(
-            cleaned_path, output_dir, model, min_speakers, max_speakers
-        )
+        srt_path = diarize_with_nemo(cleaned_path, output_dir, model)
         segments = parse_srt(srt_path)
         _fill_missing_speakers(segments)
 
