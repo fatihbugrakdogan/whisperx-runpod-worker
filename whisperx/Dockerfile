@@ -1,10 +1,8 @@
 # syntax=docker/dockerfile:1
 # ── WhisperX RunPod Serverless Worker (models baked in) ───────────────────────
 #
-# Build:
-#   export HF_TOKEN=hf_xxxx
-#   docker buildx build --secret id=hf_token,env=HF_TOKEN \
-#                        -t whisperx-worker:latest .
+# Build (Phase 3 — no HF_TOKEN needed, pyannote removed):
+#   docker buildx build -t whisperx-worker:phase3 --load .
 #
 # RunPod Serverless:
 #   Container image : whisperx-worker:latest
@@ -52,12 +50,6 @@ RUN git clone https://github.com/MahmoudAshraf97/whisper-diarization.git /app/wh
 # ── Bake Whisper large-v3 + Turkish alignment model ───────────────────────────
 COPY download_models.py /tmp/download_models.py
 RUN python /tmp/download_models.py
-
-# ── Bake pyannote diarization model (HF token stays out of image layers) ──────
-COPY download_pyannote.py /tmp/download_pyannote.py
-RUN --mount=type=secret,id=hf_token \
-    HF_TOKEN=$(cat /run/secrets/hf_token 2>/dev/null || true) \
-    python /tmp/download_pyannote.py
 
 # ── App ────────────────────────────────────────────────────────────────────────
 WORKDIR /app
