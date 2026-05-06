@@ -34,29 +34,18 @@ import subprocess
 import tempfile
 import urllib.request
 
+import noisereduce as nr
+import numpy as np
 import pyloudnorm as pyln
 import runpod
 import torch
 import torchaudio
-from df.enhance import enhance, init_df
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# --- DeepFilterNet warm-start -------------------------------------------------
-_df_model = None
-_df_state = None
-
-
-def _get_df_model():
-    global _df_model, _df_state
-    if _df_model is None:
-        print("[preprocess] Loading DeepFilterNet model")
-        _df_model, _df_state, _ = init_df()
-    return _df_model, _df_state
-
 
 def preprocess_audio(input_path: str, output_path: str) -> str:
-    """Convert to 16 kHz mono WAV, denoise with DeepFilterNet, normalize to -23 LUFS."""
+    """Convert to 16 kHz mono WAV, denoise with noisereduce, normalize to -23 LUFS."""
     audio, sr = torchaudio.load(input_path)
 
     if audio.shape[0] > 1:
@@ -66,17 +55,20 @@ def preprocess_audio(input_path: str, output_path: str) -> str:
     if sr != target_sr:
         audio = torchaudio.functional.resample(audio, sr, target_sr)
 
-    df_model, df_state = _get_df_model()
-    audio = enhance(df_model, df_state, audio)
-
     audio_np = audio.squeeze().numpy()
+
+    # Stationary noise reduction before diarization
+    audio_np = nr.reduce_noise(
+        y=audio_np, sr=target_sr, stationary=False, prop_decrease=0.75
+    ).astype(np.float32)
+
+    # Loudness normalize to -23 LUFS
     meter = pyln.Meter(target_sr)
     loudness = meter.integrated_loudness(audio_np)
     if loudness > -70:  # skip near-silence (pyln would blow up gain)
         audio_np = pyln.normalize.loudness(audio_np, loudness, -23.0)
-    audio = torch.tensor(audio_np).unsqueeze(0)
 
-    torchaudio.save(output_path, audio, target_sr)
+    torchaudio.save(output_path, torch.tensor(audio_np).unsqueeze(0), target_sr)
     print(f"[preprocess] Saved cleaned audio → {output_path}")
     return output_path
 
