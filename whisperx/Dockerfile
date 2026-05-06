@@ -40,6 +40,14 @@ RUN pip install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cu121 \
         -r /tmp/requirements.txt
 
+# ── Phase 3: whisper-diarization (NeMo ClusteringDiarizer backend) ────────────
+# Clone at a pinned commit for reproducibility; install with repo's constraints
+# to avoid conflicts with the existing WhisperX/pyannote environment.
+RUN git clone https://github.com/MahmoudAshraf97/whisper-diarization.git /app/whisper-diarization \
+    && pip install --no-cache-dir \
+       -c /app/whisper-diarization/constraints.txt \
+       -r /app/whisper-diarization/requirements.txt
+
 # ── Bake Whisper large-v3 + Turkish alignment model ───────────────────────────
 COPY download_models.py /tmp/download_models.py
 RUN python /tmp/download_models.py

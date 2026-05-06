@@ -1,15 +1,22 @@
-"""RunPod serverless handler for WhisperX transcription + diarization.
+"""RunPod serverless handler — Phase 3: DeepFilterNet preprocessing + NeMo diarization.
+
+Transcription and diarization are handled by the whisper-diarization subprocess
+(https://github.com/MahmoudAshraf97/whisper-diarization) which combines Whisper
+large-v3 with NeMo's ClusteringDiarizer instead of pyannote.
+
+Language is always Turkish ("tr") — hardcoded throughout.
 
 Input (job["input"]):
   audio_file     str   Presigned URL of the audio file
-  model          str   Whisper model name (default: "large-v3")
-  language       str   Language code (default: "tr")
-  diarize        bool  Enable speaker diarization (default: true)
-  hf_token       str   HuggingFace token for pyannote diarization model
+  model          str   Whisper model name passed to subprocess (default: "large-v3")
   min_speakers   int   Minimum number of speakers (default: 2)
   max_speakers   int   Maximum number of speakers (default: 2)
-  batch_size     int   Transcription batch size (default: 16)
-  compute_type   str   "float16" (GPU) or "int8" (CPU fallback) (default: "float16")
+  -- ignored but accepted for backward compat --
+  language       str
+  diarize        bool
+  hf_token       str
+  batch_size     int
+  compute_type   str
 
 Output:
   {
@@ -21,86 +28,136 @@ Output:
   }
 """
 
-import gc
 import os
+import shutil
+import subprocess
 import tempfile
 import urllib.request
 
-import noisereduce as nr
-import numpy as np
+import pyloudnorm as pyln
 import runpod
 import torch
-import whisperx
-from whisperx.diarize import DiarizationPipeline
+import torchaudio
+from df.enhance import enhance, init_df
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Models are baked into the image at /models (set via ENV in Dockerfile).
-# HF_HOME, TRANSFORMERS_CACHE, HF_HUB_CACHE are already correct — no override.
-
-# --- Global warm-start caches -------------------------------------------------
-_whisper_model = None
-_whisper_model_key: tuple | None = None  # (model_name, compute_type)
-
-_align_cache: dict[str, tuple | None] = {}  # language → (model, metadata) or None
-
-_diarize_pipeline = None
-_diarize_hf_token: str | None = None
+# --- DeepFilterNet warm-start -------------------------------------------------
+_df_model = None
+_df_state = None
 
 
-def _get_whisper_model(model_name: str, compute_type: str):
-    global _whisper_model, _whisper_model_key
-    key = (model_name, compute_type)
-    if _whisper_model_key != key:
-        if _whisper_model is not None:
-            del _whisper_model
-            gc.collect()
-            if DEVICE == "cuda":
-                torch.cuda.empty_cache()
-        print(f"[whisperx] Loading model {model_name} ({compute_type}) on {DEVICE}")
-        _whisper_model = whisperx.load_model(model_name, DEVICE, compute_type=compute_type)
-        _whisper_model_key = key
-    return _whisper_model
+def _get_df_model():
+    global _df_model, _df_state
+    if _df_model is None:
+        print("[preprocess] Loading DeepFilterNet model")
+        _df_model, _df_state, _ = init_df()
+    return _df_model, _df_state
 
 
-def _get_align_model(language: str):
-    """Returns (align_model, metadata) or None if unavailable for the language."""
-    global _align_cache
-    if language not in _align_cache:
-        try:
-            print(f"[whisperx] Loading alignment model for '{language}'")
-            model, metadata = whisperx.load_align_model(
-                language_code=language, device=DEVICE
-            )
-            _align_cache[language] = (model, metadata)
-        except Exception as exc:
-            print(f"[whisperx] No alignment model for '{language}': {exc} — skipping align step")
-            _align_cache[language] = None
-    return _align_cache[language]
+def preprocess_audio(input_path: str, output_path: str) -> str:
+    """Convert to 16 kHz mono WAV, denoise with DeepFilterNet, normalize to -23 LUFS."""
+    audio, sr = torchaudio.load(input_path)
+
+    if audio.shape[0] > 1:
+        audio = audio.mean(dim=0, keepdim=True)
+
+    target_sr = 16_000
+    if sr != target_sr:
+        audio = torchaudio.functional.resample(audio, sr, target_sr)
+
+    df_model, df_state = _get_df_model()
+    audio = enhance(df_model, df_state, audio)
+
+    audio_np = audio.squeeze().numpy()
+    meter = pyln.Meter(target_sr)
+    loudness = meter.integrated_loudness(audio_np)
+    if loudness > -70:  # skip near-silence (pyln would blow up gain)
+        audio_np = pyln.normalize.loudness(audio_np, loudness, -23.0)
+    audio = torch.tensor(audio_np).unsqueeze(0)
+
+    torchaudio.save(output_path, audio, target_sr)
+    print(f"[preprocess] Saved cleaned audio → {output_path}")
+    return output_path
 
 
-def _get_diarize_pipeline(hf_token: str):
-    global _diarize_pipeline, _diarize_hf_token
-    if _diarize_hf_token != hf_token or _diarize_pipeline is None:
-        print("[whisperx] Loading diarization pipeline")
-        _diarize_pipeline = DiarizationPipeline(
-            model_name="pyannote/speaker-diarization-3.1",
-            token=hf_token,
-            device=DEVICE,
-        )
-        # Lower clustering threshold → more aggressive speaker separation.
-        # Default ~0.7; 0.5 works better for phone recordings with echo/reverb.
-        try:
-            _diarize_pipeline.model.instantiate({"clustering": {"threshold": 0.50}})
-            print("[whisperx] Using speaker-diarization-3.1, threshold=0.50")
-        except Exception as e:
-            print(f"[whisperx] Could not set clustering threshold: {e}")
-        _diarize_hf_token = hf_token
-    return _diarize_pipeline
+# --- NeMo diarization via whisper-diarization subprocess ---------------------
+
+def diarize_with_nemo(
+    audio_path: str,
+    output_dir: str,
+    model: str = "large-v3",
+    min_speakers: int = 2,
+    max_speakers: int = 2,
+) -> str:
+    """Run whisper-diarization (NeMo backend). Returns path to the output SRT file."""
+    os.makedirs(output_dir, exist_ok=True)
+
+    cmd = [
+        "python", "/app/whisper-diarization/diarize.py",
+        "-a", audio_path,
+        "--whisper-model", model,
+        "--device", DEVICE,
+        "--language", "tr",
+        "--stemming", "False",  # audio already preprocessed by DeepFilterNet
+    ]
+    # Pass an exact speaker count only when caller is certain (min == max).
+    # NeMo oracle mode over-constrains when the number is wrong.
+    if min_speakers == max_speakers:
+        cmd.extend(["--num-speakers", str(min_speakers)])
+
+    print(f"[nemo] Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd=output_dir, timeout=3600)
+
+    base = os.path.splitext(os.path.basename(audio_path))[0]
+    srt_path = os.path.join(output_dir, f"{base}.srt")
+    if not os.path.exists(srt_path):
+        raise FileNotFoundError(f"Expected SRT output not found: {srt_path}")
+    return srt_path
 
 
-def _fill_missing_speakers(segments: list) -> None:
-    """Propagate speaker labels to segments that pyannote left unlabeled."""
+def _srt_ts_to_s(ts: str) -> float:
+    """Parse SRT timestamp 'HH:MM:SS,mmm' → seconds."""
+    h, m, s = ts.strip().replace(",", ".").split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def parse_srt(srt_path: str) -> list[dict]:
+    """Parse whisper-diarization SRT output into [{id, start, end, text, speaker}]."""
+    with open(srt_path, encoding="utf-8") as f:
+        content = f.read()
+
+    segments = []
+    for i, block in enumerate(content.strip().split("\n\n")):
+        lines = [ln for ln in block.strip().splitlines() if ln.strip()]
+        if len(lines) < 3 or " --> " not in lines[1]:
+            continue
+
+        start_str, end_str = lines[1].split(" --> ", 1)
+        raw_text = " ".join(lines[2:]).strip()
+
+        speaker = ""
+        text = raw_text
+        # whisper-diarization prefixes each line with "SPEAKER_XX: "
+        if raw_text.startswith("SPEAKER_"):
+            colon = raw_text.find(": ")
+            if colon != -1:
+                speaker = raw_text[:colon].strip()
+                text = raw_text[colon + 2:].strip()
+
+        segments.append({
+            "id": i,
+            "start": round(_srt_ts_to_s(start_str), 3),
+            "end": round(_srt_ts_to_s(end_str), 3),
+            "text": text,
+            "speaker": speaker,
+        })
+
+    return segments
+
+
+def _fill_missing_speakers(segments: list[dict]) -> None:
+    """Propagate speaker labels forward to any unlabeled segments."""
     last = ""
     for seg in segments:
         if seg.get("speaker"):
@@ -112,16 +169,11 @@ def _fill_missing_speakers(segments: list) -> None:
 def handler(job: dict) -> dict:
     inp = job["input"]
     audio_url: str = inp["audio_file"]
-    model_name: str = inp.get("model", "large-v3")
-    language: str = inp.get("language", "tr")
-    do_diarize: bool = bool(inp.get("diarize", True))
-    hf_token: str = inp.get("hf_token", "")
+    model: str = inp.get("model", "large-v3")
     min_speakers: int = int(inp.get("min_speakers", 2))
     max_speakers: int = int(inp.get("max_speakers", 2))
-    batch_size: int = int(inp.get("batch_size", 16))
-    compute_type: str = inp.get("compute_type", "float16" if DEVICE == "cuda" else "int8")
+    # language always "tr"; hf_token / diarize / batch_size / compute_type ignored
 
-    # 1. Download audio ---------------------------------------------------------
     suffix = ".wav"
     for ext in (".mp3", ".m4a", ".ogg", ".flac", ".aac", ".webm"):
         if ext in audio_url.lower():
@@ -129,83 +181,41 @@ def handler(job: dict) -> dict:
             break
 
     tmp_path = None
+    cleaned_path = None
+    output_dir = None
+    segments: list[dict] = []
     try:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp_path = tmp.name
-        print(f"[whisperx] Downloading audio from URL → {tmp_path}")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as cleaned:
+            cleaned_path = cleaned.name
+        output_dir = tempfile.mkdtemp()
+
+        # 1. Download + preprocess
+        print(f"[handler] Downloading audio → {tmp_path}")
         urllib.request.urlretrieve(audio_url, tmp_path)
-        audio = whisperx.load_audio(tmp_path)
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        preprocess_audio(tmp_path, cleaned_path)
 
-    # 2. Transcribe -------------------------------------------------------------
-    print(f"[whisperx] Transcribing (model={model_name}, lang={language}, batch={batch_size})")
-    model = _get_whisper_model(model_name, compute_type)
-    result = model.transcribe(audio, batch_size=batch_size, language=language)
-    detected_language = result.get("language", language)
-    print(f"[whisperx] Detected language: {detected_language}, segments: {len(result['segments'])}")
-
-    # 3. Align (word-level timestamps, best effort) -----------------------------
-    align_result = _get_align_model(detected_language)
-    if align_result is not None:
-        align_model, metadata = align_result
-        print("[whisperx] Aligning…")
-        result = whisperx.align(
-            result["segments"],
-            align_model,
-            metadata,
-            audio,
-            DEVICE,
-            return_char_alignments=False,
+        # 2. Transcribe + diarize via NeMo hybrid subprocess
+        srt_path = diarize_with_nemo(
+            cleaned_path, output_dir, model, min_speakers, max_speakers
         )
+        segments = parse_srt(srt_path)
+        _fill_missing_speakers(segments)
 
-    # 4. Denoise audio before diarization (keeps transcription untouched) --------
-    print("[whisperx] Applying noise reduction for diarization…")
-    audio_denoised = nr.reduce_noise(
-        y=audio,
-        sr=whisperx.audio.SAMPLE_RATE,
-        stationary=False,
-        prop_decrease=0.75,
-    ).astype(np.float32)
-
-    # 5. Diarize (speaker labels) -----------------------------------------------
-    if do_diarize and hf_token:
-        print(f"[whisperx] Diarizing (min={min_speakers}, max={max_speakers})…")
-        diarize = _get_diarize_pipeline(hf_token)
-        diarize_segments = diarize(
-            audio_denoised,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-        )
-        result = whisperx.assign_word_speakers(diarize_segments, result)
-        # Fill missing speaker labels by propagating the nearest known speaker
-        _fill_missing_speakers(result.get("segments", []))
-        # Log speaker distribution for debugging
         from collections import Counter
-        dist = Counter(s.get("speaker", "") for s in result.get("segments", []))
-        print(f"[whisperx] Speaker distribution: {dict(dist)}")
-    elif do_diarize and not hf_token:
-        print("[whisperx] WARNING: diarize=true but hf_token is empty — skipping diarization")
+        dist = Counter(s.get("speaker", "") for s in segments)
+        print(f"[nemo] Speaker distribution: {dict(dist)}")
 
-    # 5. Normalise output -------------------------------------------------------
-    out_segments = []
-    for i, seg in enumerate(result.get("segments", [])):
-        out_segments.append(
-            {
-                "id": i,
-                "start": round(float(seg.get("start", 0.0)), 3),
-                "end": round(float(seg.get("end", 0.0)), 3),
-                "text": seg.get("text", "").strip(),
-                "speaker": seg.get("speaker", ""),
-            }
-        )
+    finally:
+        for p in (tmp_path, cleaned_path):
+            if p and os.path.exists(p):
+                os.unlink(p)
+        if output_dir:
+            shutil.rmtree(output_dir, ignore_errors=True)
 
-    print(f"[whisperx] Done. Output segments: {len(out_segments)}")
-    return {
-        "segments": out_segments,
-        "language": detected_language,
-    }
+    print(f"[nemo] Done. Output segments: {len(segments)}")
+    return {"segments": segments, "language": "tr"}
 
 
 runpod.serverless.start({"handler": handler})

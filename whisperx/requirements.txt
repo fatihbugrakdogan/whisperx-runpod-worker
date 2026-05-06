@@ -13,3 +13,7 @@ ctranslate2>=4.0.0
 # Audio enhancement — noise/echo reduction before diarization
 noisereduce>=3.0.0
 scipy>=1.11.0
+
+# Phase-1 preprocessing: DeepFilterNet denoising + loudness normalization
+deepfilternet>=0.5.6
+pyloudnorm>=0.1.1
