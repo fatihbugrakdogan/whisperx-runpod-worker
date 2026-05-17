@@ -1,0 +1,35 @@
+# Build context lives at the workers/ repo root once the whisperx image
+# starts copying `diarization/` in addition to `whisperx/`. Trim aggressively
+# so the GitHub runner doesn't ship megabytes of unrelated files to the
+# Docker daemon every push.
+
+# Git plumbing — never needed inside the image.
+**/.git
+**/.gitignore
+**/.gitattributes
+
+# OS / editor cruft.
+**/.DS_Store
+**/Thumbs.db
+**/.idea
+**/.vscode
+
+# Python build/test artifacts.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/venv
+
+# Diarization fork extras the runtime doesn't need.
+diarization/Whisper_Transcription_+_NeMo_Diarization.ipynb
+diarization/tests
+diarization/README.md
+diarization/LICENSE
+
+# CI / docs.
+.github
+**/*.md

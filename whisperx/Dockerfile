@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1
 # ── WhisperX RunPod Serverless Worker (models baked in) ───────────────────────
 #
-# Build:
-#   docker buildx build -t fatihbugra/whisperx-worker:latest --push .
+# Build (from the workers/ repo root, not from whisperx/):
+#   docker buildx build -t fatihbugra/whisperx-worker:latest -f whisperx/Dockerfile --push .
+#
+# Build context = workers/ root so we can COPY both whisperx/ and the local
+# whisper-diarization fork that lives at workers/diarization/.
 #
 # RunPod Serverless:
 #   Container image : fatihbugra/whisperx-worker:latest
@@ -33,23 +36,30 @@ RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # ── Python dependencies ────────────────────────────────────────────────────────
-COPY requirements.txt /tmp/requirements.txt
+COPY whisperx/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cu121 \
         -r /tmp/requirements.txt
 
-# ── whisper-diarization (NeMo backend) ────────────────────────────────────────
-RUN git clone https://github.com/MahmoudAshraf97/whisper-diarization.git /app/whisper-diarization \
-    && pip install --no-cache-dir \
+# ── whisper-diarization (local fork at workers/diarization/) ──────────────────
+# Replaces the previous `git clone github.com/MahmoudAshraf97/whisper-diarization`
+# so our domain-specific patches ship to prod:
+#   - num_speakers=2 fixed for therapy diarization
+#   - condition_on_previous_text=False (Whisper hallucination guard)
+#   - --diarizer {msdd,sortformer} flag for runtime backend selection
+# Upstream improvements are pulled in by syncing workers/diarization/ from the
+# fork; nothing here is auto-updated from GitHub.
+COPY diarization /app/whisper-diarization
+RUN pip install --no-cache-dir \
        -c /app/whisper-diarization/constraints.txt \
        -r /app/whisper-diarization/requirements.txt
 
 # ── Bake Whisper large-v3 + Turkish alignment model ───────────────────────────
-COPY download_models.py /tmp/download_models.py
+COPY whisperx/download_models.py /tmp/download_models.py
 RUN python /tmp/download_models.py
 
 # ── App ────────────────────────────────────────────────────────────────────────
 WORKDIR /app
-COPY handler.py .
+COPY whisperx/handler.py .
 
 CMD ["python", "-u", "handler.py"]
