@@ -5,8 +5,6 @@ on:
     branches: [main]
     paths:
       - "whisperx/**"
-      - "diarization/**"
-      - ".dockerignore"
       - ".github/workflows/build-whisperx.yml"
   workflow_dispatch:
 
@@ -37,10 +35,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          # Context = repo root so the Dockerfile can COPY both whisperx/ and
-          # the local whisper-diarization fork at diarization/.
-          context: .
-          file: whisperx/Dockerfile
+          context: whisperx
           platforms: linux/amd64
           push: true
           tags: fatihbugra/whisperx-worker:latest
