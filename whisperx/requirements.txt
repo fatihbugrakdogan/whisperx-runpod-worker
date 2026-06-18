@@ -14,3 +14,6 @@ scipy>=1.11.0
 
 # Phase-1 preprocessing: loudness normalization
 pyloudnorm>=0.1.1
+
+# Error tracking → GlitchTip (Sentry protocol). Active only when SENTRY_DSN set.
+sentry-sdk>=2.20.0

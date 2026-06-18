@@ -28,11 +28,13 @@ Output:
   }
 """
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 
 import noisereduce as nr
@@ -43,6 +45,62 @@ import torch
 import torchaudio
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _init_error_tracking() -> bool:
+    """Point the Sentry SDK at GlitchTip when SENTRY_DSN is set. Returns whether
+    capture is active. No transcript text is ever sent — only the job id and the
+    exception/stack from a failed transcription."""
+    dsn = os.environ.get("SENTRY_DSN")
+    if not dsn:
+        return False
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(
+            dsn=dsn,
+            environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
+            send_default_pii=False,
+            traces_sample_rate=0.0,
+        )
+        sentry_sdk.set_tag("component", "transcriptor")
+        return True
+    except Exception as exc:
+        print(f"[sentry] init failed: {exc!r}")
+        return False
+
+
+_SENTRY_ON = _init_error_tracking()
+
+
+def _gpu_name() -> str:
+    """Resolve the assigned GPU model so the backend can attribute cost.
+
+    RunPod assigns A4000 / A5000 / A100 at the pool level; the worker is the
+    only place that can see which one actually ran the job.
+    """
+    try:
+        if torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+    except Exception:
+        pass
+    return "cpu"
+
+
+def _audio_duration_s(path: str) -> float:
+    """Wall-clock length of the audio in seconds — the primary cost driver.
+
+    Uses the lightweight torchaudio metadata probe (no full decode). Returns
+    0.0 if the container doesn't report frame count; the caller falls back to
+    the last segment's end time.
+    """
+    try:
+        info = torchaudio.info(path)
+        if info.num_frames and info.sample_rate:
+            return info.num_frames / info.sample_rate
+    except Exception:
+        pass
+    return 0.0
 
 
 def preprocess_audio(input_path: str, output_path: str) -> str:
@@ -183,6 +241,12 @@ def handler(job: dict) -> dict:
     cleaned_path = None
     output_dir = None
     segments: list[dict] = []
+    # Cost-tracking checkpoints. The backend turns these into a billable
+    # UsageEvent (audio minutes + GPU-seconds). All times are wall-clock.
+    t_start = time.time()
+    t_downloaded = t_preprocessed = t_diarized = t_start
+    file_bytes = 0
+    audio_seconds = 0.0
     try:
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
             tmp_path = tmp.name
@@ -193,12 +257,20 @@ def handler(job: dict) -> dict:
         # 1. Download + preprocess
         print(f"[handler] Downloading audio → {tmp_path}")
         urllib.request.urlretrieve(audio_url, tmp_path)
+        t_downloaded = time.time()
+        try:
+            file_bytes = os.path.getsize(tmp_path)
+        except OSError:
+            file_bytes = 0
+        audio_seconds = _audio_duration_s(tmp_path)
         preprocess_audio(tmp_path, cleaned_path)
+        t_preprocessed = time.time()
 
         # 2. Transcribe + diarize via NeMo hybrid subprocess
         srt_path = diarize_with_nemo(cleaned_path, output_dir, model)
         segments = parse_srt(srt_path)
         _fill_missing_speakers(segments)
+        t_diarized = time.time()
 
         from collections import Counter
         dist = Counter(s.get("speaker", "") for s in segments)
@@ -211,8 +283,47 @@ def handler(job: dict) -> dict:
         if output_dir:
             shutil.rmtree(output_dir, ignore_errors=True)
 
+    # Fall back to the last segment's end if the container had no frame count.
+    if audio_seconds <= 0.0 and segments:
+        audio_seconds = max((s.get("end", 0.0) for s in segments), default=0.0)
+
+    t_end = time.time()
+    metrics = {
+        "audio_seconds": round(audio_seconds, 2),
+        "file_bytes": file_bytes,
+        "processing_seconds": round(t_end - t_start, 2),
+        "download_seconds": round(t_downloaded - t_start, 2),
+        "preprocess_seconds": round(t_preprocessed - t_downloaded, 2),
+        "diarize_seconds": round(t_diarized - t_preprocessed, 2),
+        "gpu_name": _gpu_name(),
+        "device": DEVICE,
+        "model": model,
+        "num_speakers": len({s.get("speaker", "") for s in segments if s.get("speaker")}),
+        "num_segments": len(segments),
+    }
+    # Single structured line so RunPod's captured stdout is grep/JSON-parseable.
+    print("[metrics] " + json.dumps(metrics))
     print(f"[nemo] Done. Output segments: {len(segments)}")
-    return {"segments": segments, "language": "tr"}
+    return {"segments": segments, "language": "tr", "metrics": metrics}
 
 
-runpod.serverless.start({"handler": handler})
+def _entry(job: dict) -> dict:
+    """Capture failures to GlitchTip (with the job id tag) then re-raise so
+    RunPod still marks the job FAILED."""
+    if _SENTRY_ON:
+        import sentry_sdk
+
+        with sentry_sdk.configure_scope() as scope:
+            scope.set_tag("runpod_job_id", str(job.get("id", "")))
+    try:
+        return handler(job)
+    except Exception:
+        if _SENTRY_ON:
+            import sentry_sdk
+
+            sentry_sdk.capture_exception()
+            sentry_sdk.flush(timeout=2.0)
+        raise
+
+
+runpod.serverless.start({"handler": _entry})
