@@ -55,13 +55,20 @@ def _init_error_tracking() -> bool:
     if not dsn:
         return False
     try:
+        import logging
+
         import sentry_sdk
+        from sentry_sdk.integrations.logging import LoggingIntegration
 
         sentry_sdk.init(
             dsn=dsn,
             environment=os.environ.get("SENTRY_ENVIRONMENT", "production"),
             send_default_pii=False,
             traces_sample_rate=0.0,
+            # ERROR+ logs become GlitchTip events; INFO+ become breadcrumbs.
+            integrations=[
+                LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)
+            ],
         )
         sentry_sdk.set_tag("component", "transcriptor")
         return True
